@@ -4,14 +4,14 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from torchvision.models import ResNet50_Weights
+#from torchvision.models import ResNet50_Weights
 from torchvision import datasets
 import torchvision.models as models
 import torchvision.transforms as transforms
 
 # Debugger & Profiler
-# import smdebug.pytorch as smd
-# from smdebug.profiler.utils import str2bool
+import smdebug.pytorch as smd
+from smdebug.profiler.utils import str2bool
 
 
 import argparse
@@ -29,7 +29,7 @@ logger.setLevel(logging.DEBUG)
 NUM_OUTPUT_LABELS = 133
 MODEL_FOLDER_PATH = "./model"
 
-def test(model, test_loader, criterion, device, hook=None):
+def test(model, test_loader, criterion, device):
     '''
         Complete this function that can take a model and a
         testing data loader and will get the test accuray/loss of the model
@@ -39,8 +39,6 @@ def test(model, test_loader, criterion, device, hook=None):
     print("##########################################")
     print("# Testing Model on Whole Testing Dataset #")
     print("##########################################")
-
-    #hook.set_mode(smd.modes.EVAL)
 
     model.to(device)
     model.eval()
@@ -65,6 +63,7 @@ def test(model, test_loader, criterion, device, hook=None):
     print("Test set: Average loss: {:.4f}, Accuracy: {}/{} ({:.0f}%)\n".format(
         loss.item(), running_corrects, len(test_loader.dataset), 100.0 * total_acc
     ))
+    print("Testing Total Loss: {:.3f}, Testing Accuracy: {:.3f}%".format(total_loss, 100*total_acc))
 
 
 def train(model, train_loader, validation_loader, epochs, criterion, optimizer, device, hook=None):
@@ -88,10 +87,10 @@ def train(model, train_loader, validation_loader, epochs, criterion, optimizer, 
             print(f"Epoch {epoch}, Phase {phase}")
 
             if phase == 'train':
-                #hook.set_mode(smd.modes.TRAIN)
+                hook.set_mode(smd.modes.TRAIN)
                 model.train()
             else:
-                #hook.set_mode(smd.modes.EVAL)
+                hook.set_mode(smd.modes.EVAL)
                 model.eval()
 
             running_loss = 0.0
@@ -126,23 +125,11 @@ def train(model, train_loader, validation_loader, epochs, criterion, optimizer, 
                         100.0*accuracy,
                         time.asctime() # for measuring time for testing, remove for students and in the formatting
                     )
-                )
-
-                #NOTE: Comment lines below to train and test on whole dataset
-                if running_samples > (0.2 * len(image_dataset[phase].dataset)):
-                    break
-            
+                ) 
+                    
             epoch_loss = running_loss / running_samples
             epoch_acc = running_corrects / running_samples
-
-            if phase == 'valid':
-                if epoch_loss < best_loss:
-                    best_loss = epoch_loss
-                else:
-                    loss_counter += 1
-        
-        if loss_counter == 1:
-            break
+            print("Phase training, Epoch loss {:.3f}, Epoch accuracy {:.3f}".format(epoch_loss, 100*epoch_acc))
 
     return model
 
@@ -150,16 +137,20 @@ def net():
     '''
         Use RESNET50 pretrained model
     '''
-    logger.info('Resnet50 Pretrained Model')
+    model = models.resnet50(pretrained=True)
 
-    model = models.resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
-    # Freeze Model Parameters. This means we don't need to
-    # update the pretrained parameters
+    # Freeze training of the convolutional layers
     for param in model.parameters():
-        param.requires_grad = False
-    num_features = model.fc.in_features
-    model.fc = nn.Sequential(nn.Linear(num_features, NUM_OUTPUT_LABELS))
+        param.requires_grad = False   
 
+    # Override the last layer to adjust it to our problem
+    num_features=model.fc.in_features
+    model.fc = nn.Sequential(
+        nn.Linear(num_features, 1024),
+        nn.ReLU(inplace=True),
+        nn.Linear(1024, 133)
+    )
+    
     return model
 
 def create_data_loaders(data_path, batch_size):
@@ -193,7 +184,7 @@ def get_args():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=2,
+        default=14,
         metavar="N",
         help="number of epochs to train (default: 14)",
     )
@@ -202,12 +193,12 @@ def get_args():
     )
 
     # Profiler -If True, the script will run on GPU
-    #parser.add_argument("--gpu", type=str2bool, default=True)
+    parser.add_argument("--gpu", type=str2bool, default=True)
 
     # Pass channel data as arguments (train, validation, test)
-    parser.add_argument('--train', type=str, default=os.environ['SM_CHANNEL_TRAINING'])
-    parser.add_argument('--valid', type=str, default=os.environ['SM_CHANNEL_VALIDATION'])
-    parser.add_argument('--test', type=str, default=os.environ['SM_CHANNEL_TESTING'])
+    parser.add_argument('--train', type=str, default=os.environ['SM_CHANNEL_TRAINING'] )
+    parser.add_argument('--valid',  type=str, default=os.environ['SM_CHANNEL_VALIDATION'] )
+    parser.add_argument('--test', type=str, default=os.environ['SM_CHANNEL_TESTING'] )
 
     args = parser.parse_args()
     return args
@@ -229,9 +220,9 @@ def main():
     optimizer = optim.Adam(model.parameters(), args.lr)
 
     # Debugger - Create Hook for capture tensors
-    # hook = smd.Hook.create_from_json_file()
-    # hook.register_hook(model)
-    # hook.register_loss(loss_criterion)
+    hook = smd.Hook.create_from_json_file()
+    hook.register_hook(model)
+    hook.register_loss(loss_criterion)
 
     # Determine if we should use the CUDA GPU
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -245,15 +236,18 @@ def main():
         loss_criterion,
         optimizer,
         device,
-        #hook
+        hook
     )
 
     # Save the trained model
     save_model(model, MODEL_FOLDER_PATH)
 
     # Test the model to see its accuracy
-    test(model, test_loader, loss_criterion, device, #hook
-         )
+    test(model, 
+         test_loader, 
+         loss_criterion, 
+         device
+    )
 
 
 if __name__=='__main__':
